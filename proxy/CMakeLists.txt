@@ -9,9 +9,11 @@ set(SOURCES
     src/main.cpp
     src/proxy/proxy_task.cpp
     src/proxy/proxy.cpp
+    src/proxy/request_monitor.cpp
     src/util/error/error.cpp
     src/util/http_parser/http_parser.cpp
     src/multithreading/thread_pool.cpp
+    src/cache/cache.cpp
 )
 
 add_executable(proxy_server ${SOURCES})
@@ -23,6 +25,7 @@ target_include_directories(proxy_server PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/util/error
     ${CMAKE_CURRENT_SOURCE_DIR}/src/util/http_parser
     ${CMAKE_CURRENT_SOURCE_DIR}/src/multithreading
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/cache
 )
 
 target_compile_options(proxy_server PRIVATE -Wall -Wextra -pedantic)

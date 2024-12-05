@@ -10,8 +10,8 @@
 #include <netdb.h>
 
 namespace CHP {
-    int ProxyTask::readFrom(int fd, std::unique_ptr<char[]>& buffer) {
-        buffer = std::make_unique<char[]>(startBufferSize);
+    int ProxyTask::readFrom(int fd, std::shared_ptr<char[]>& buffer) {
+        buffer = std::make_shared<char[]>(startBufferSize);
         int bufferSize = startBufferSize;
         int cursor = 0;
 
@@ -40,7 +40,7 @@ namespace CHP {
         return cursor;
     }
 
-    int ProxyTask::writeTo(int fd, std::unique_ptr<char[]>& buffer, int length) {
+    int ProxyTask::writeTo(int fd, std::shared_ptr<char[]>& buffer, int length) {
         int cursor = 0;
         while (cursor < length) {
             int toWrite = length - cursor < startBufferSize? length - cursor: startBufferSize;
@@ -84,12 +84,21 @@ namespace CHP {
         return tmp;
     }
 
-    ProxyTask::ProxyTask(int client) {
+    ProxyTask::ProxyTask(
+        int client, 
+        std::shared_ptr<RequestMonitor>& monitor,
+        std::shared_ptr<cache::Cache>& cache,
+        std::shared_ptr<MT::ThreadPool>& workers,
+        bool& shutdown
+    ): shutdown(shutdown) {
         this->client = client;
+        this->monitor = monitor;
+        this->cache = cache;
+        this->workers = workers;
     }
 
     void ProxyTask::execute() {
-        std::unique_ptr<char[]> request;
+        std::shared_ptr<char[]> request;
         int requestLength = readFrom(client, request);
         if (requestLength == -1) {
             return;
@@ -100,37 +109,83 @@ namespace CHP {
             return;
         }
 
-        auto headers = util::http::getHeaders(request.get());
-        std::string_view host = "";
-        for (const auto& header : headers) {
-            if (header.first == "Host") {
-                host = header.second;
-                break;
+        auto cacheEntry = cache.get()->get(request, requestLength);
+        std::shared_ptr<char[]> response = cacheEntry.first;
+        int responseLength = cacheEntry.second;
+
+        bool communicateServer = false;
+
+        if (!response && !monitor->registration(request.get())) {
+            monitor->wait(request.get());
+
+            cacheEntry = cache.get()->get(request, requestLength);
+            response = cacheEntry.first;
+            if (!response) {
+                communicateServer = true;
             }
+
+            responseLength = cacheEntry.second;
         }
 
-        server = connectToServer(host, 80);
-        if (server == -1) {
-            return;
+        if (communicateServer) {
+            monitor->registration(std::string_view(request.get(), requestLength));
+
+            auto headers = util::http::getHeaders(request.get());
+            std::string_view host;
+            for (const auto& header : headers) {
+                if (header.first == "Host") {
+                    host = header.second;
+                    break;
+                }
+            }
+
+            while (true) {
+                server = connectToServer(host, 80);
+                if (server == -1) {
+                    break;
+                }
+
+                if (writeTo(server, request, requestLength)) {
+                    break;
+                }
+
+                responseLength = readFrom(server, response);
+                if (responseLength == -1) {
+                    break;
+                }
+
+                int status = util::http::response::getStatus(response.get());
+
+                if (method == "GET" && status >= 200 && status < 300) {
+                    cache->insert(request, requestLength, response, responseLength);
+                    break;
+                } else if (status > 300 && status < 400) {
+                    headers = util::http::getHeaders(response.get());
+                    host = "";
+                    for (auto& header : headers) {
+                        if (header.first == "Location") {
+                            host = header.second;
+                            break;
+                        }
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            monitor->notify(request.get());
         }
 
-        if (writeTo(server, request, requestLength)) {
-            return;
+        if (responseLength > 0) {
+            writeTo(client, response, responseLength);
         }
-
-        std::unique_ptr<char[]> response;
-        int responseLength = readFrom(server, response);
-        if (responseLength == -1) {
-            return;
-        }
-
-        writeTo(client, response, responseLength);
     }
 
     ProxyTask::~ProxyTask() {
+        shutdown = true;
         close(client);
         if (server > 0) {
             close(server);
         }
     }
-} // namespace CachingHttpProxy
+}

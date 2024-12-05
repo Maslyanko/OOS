@@ -6,7 +6,12 @@
 #include <arpa/inet.h>
 
 namespace CHP {
-    Proxy::Proxy(int port, int maxClientsThreads): workers(maxClientsThreads) {
+    Proxy::Proxy(int port, 
+            int maxClientsThreads,
+            int minCacheSize,
+            int maxCacheSize,
+            int cacheTtl
+    ) {
         if (port < 0 || port > 65535) {
             throw util::Exception("Invalid port number");
         }
@@ -19,6 +24,10 @@ namespace CHP {
         proxyAddr.sin_addr.s_addr = INADDR_ANY;
 
         util::cErrHandler("Bind: ", bind(listenSocket, (sockaddr*)&proxyAddr, sizeof(proxyAddr)));
+
+        monitor = std::make_shared<RequestMonitor>();
+        cache = std::make_shared<cache::Cache>(minCacheSize, maxCacheSize, cacheTtl);
+        workers = std::make_shared<MT::ThreadPool>(maxClientsThreads);
     };
 
     void Proxy::start() {
@@ -31,17 +40,22 @@ namespace CHP {
             if (clientSocket == -1 && errno == EMFILE) {
                 continue;
             } else if (clientSocket > 0) {
-                workers.addTask(std::make_unique<ProxyTask>(clientSocket));
+                workers->addTask(std::make_unique<ProxyTask>(
+                    clientSocket, monitor, cache, workers, shutDown
+                ));
             }
         }
     }
 
     void Proxy::shutdown() {
-        workers.clearTasks();
+        workers->clearTasks();
     }
 
     Proxy::~Proxy() {
-        shutdown();
         close(listenSocket);
+        shutdown();
+        monitor.reset();
+        cache.reset();
+        workers.reset();
     }
 }
